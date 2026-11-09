@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Northwind Notes</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="/?utm_source=fixture">Northwind Notes</a>
+    <nav><a href="/pricing?ref=nav">Pricing</a> <a href="/docs#start">Docs</a></nav>
+  </header>
+  <main>
+    <section class="hero" id="hero">
+      <h1>Notes that keep up with your team</h1>
+      <p class="lede">Capture decisions, link them to work, and find them again in seconds.</p>
+      <a class="button" href="/signup?plan=pro&token=secret123">Start free</a>
+    </section>
+    <section class="features">
+      <article class="feature-card"><h3>Fast capture</h3><p>Write from anywhere with one shortcut.</p></article>
+      <article class="feature-card"><h3>Linked decisions</h3><p>Connect notes to issues and pull requests.</p></article>
+      <article class="feature-card"><h3>Instant search</h3><p>Find any note by what it says, not where it lives.</p></article>
+      <style>.feature-card h3 { letter-spacing: -0.01em; }</style>
+    </section>
+    <section class="signup">
+      <form>
+        <label>Email <input name="email" type="email" value="private@example.com"></label>
+        <textarea name="notes">confidential draft text</textarea>
+        <input type="hidden" name="csrf" value="hidden-csrf-token">
+        <button type="submit">Join the waitlist</button>
+      </form>
+    </section>
+  </main>
+</body>
+</html>

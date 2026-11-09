@@ -1,0 +1,5 @@
+packages:
+  - extension
+  - api
+  - shared
+  - fixtures/react

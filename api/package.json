@@ -1,0 +1,25 @@
+{
+  "name": "@pagepatch/api",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "esbuild src/server.ts --bundle --platform=node --format=esm --target=node22 --external:@anthropic-ai/sdk --external:openai --external:hono --external:@hono/node-server --external:postgres --external:diff --outfile=dist/server.js",
+    "start": "node dist/server.js",
+    "dev": "node --watch --experimental-strip-types src/server.ts",
+    "test": "node --test --experimental-strip-types src/*.test.ts",
+    "typecheck": "tsc --noEmit -p ."
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.70.0",
+    "@hono/node-server": "^1.13.7",
+    "diff": "^8.0.2",
+    "hono": "^4.6.12",
+    "openai": "^6.9.0",
+    "postgres": "^3.4.5"
+  },
+  "devDependencies": {
+    "@pagepatch/shared": "workspace:*",
+    "@types/node": "^22.10.0",
+    "esbuild": "^0.25.0"
+  }
+}

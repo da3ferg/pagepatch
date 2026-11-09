@@ -1,0 +1,10 @@
+body { margin: 0; font: 16px/1.5 system-ui, sans-serif; color: #1d1d1f; }
+.hero { padding: 64px 32px; }
+.hero h1 { font-size: 40px; margin: 0 0 12px; }
+.hero-sub { color: #6e6e73; }
+.cta { display: inline-block; background: #2f6feb; color: #fff; padding: 10px 18px; border-radius: 8px; text-decoration: none; }
+.pricing { padding: 32px; }
+.plan-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 24px; }
+.plan { border-top: 2px solid #1d1d1f; padding-top: 12px; }
+.price { font-size: 28px; font-weight: 700; margin: 4px 0; }
+.rerender { margin: 0 32px 32px; }
