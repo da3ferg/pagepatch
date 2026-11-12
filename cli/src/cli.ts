@@ -74,7 +74,7 @@ for (const [s, p] of [[servers.proxy, port], [servers.panel, panelPort]] as cons
 }
 await new Promise<void>((r) => servers.panel.listen(panelPort, "127.0.0.1", r));
 servers.proxy.listen(port, "127.0.0.1", () => {
-  const problem = unusable(settings);
+  const problem = unusable(settings, available);
   console.log(`
   PagePatch is running
 

@@ -278,7 +278,7 @@ export function createServers(o: Options) {
     return {
       provider: s.provider, model: s.model, defaults: DEFAULT_MODEL, available: o.available,
       hasKey: { anthropic: !!s.keys.anthropic, openai: !!s.keys.openai },
-      problem: unusable(s),
+      problem: unusable(s, o.available),
     };
   }
 

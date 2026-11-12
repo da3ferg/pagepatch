@@ -45,9 +45,9 @@ export function detect(): Record<Provider, boolean> {
 }
 
 /** Why this configuration can't run, or null if it can. */
-export function unusable(s: Settings): string | null {
-  if (s.provider === "claude-code" && !findBin("claude")) return "Claude Code isn't installed.";
-  if (s.provider === "codex" && !findBin("codex")) return "Codex isn't installed.";
+export function unusable(s: Settings, available: Record<Provider, boolean> = detect()): string | null {
+  if (s.provider === "claude-code" && !available["claude-code"]) return "Claude Code isn't installed.";
+  if (s.provider === "codex" && !available.codex) return "Codex isn't installed.";
   if (s.provider === "anthropic" && !s.keys.anthropic) return "Add an Anthropic API key.";
   if (s.provider === "openai" && !s.keys.openai) return "Add an OpenAI API key.";
   if (s.provider === "openai" && !s.model) return "Enter an OpenAI model id.";
