@@ -1,112 +1,97 @@
 # PagePatch
 
-Conversational editing for Chrome. Click a section of a page, describe a change, and preview it in the current tab. Follow up to refine it. When it looks right, PagePatch finds the source in your GitHub repo, shows you a diff, and opens a draft pull request after you approve it.
+Conversational editing for your local dev site. Click a section of the page, describe a change, and preview it right there. Follow up to refine it. When it looks right, PagePatch finds the source file in your project, shows you a diff, and writes it to disk after you approve it. Your dev server reloads with the real change.
 
-- **Preview** works on any `http(s)` page, including `localhost`, with no GitHub connection.
-- **Source patches** support React and static HTML/CSS projects.
-- **Bring your own key** for OpenAI or Anthropic.
+Everything runs on your machine. There's no extension, hosted API, database, or GitHub connection. The only thing that leaves your computer is the request to the model you pick.
+
+- **Works with any dev server**: Vite, Next, CRA, a static server, anything on `http://localhost`.
+- **Source edits** for React (JSX/TSX) and static HTML/CSS projects.
+- **Bring your own model**: Claude Code or Codex, using the login you already have (your Claude or ChatGPT plan). An Anthropic or OpenAI API key works too.
+
+## Quick start
+
+Requirements: Node 22 and pnpm 10.
+
+```bash
+pnpm install
+pnpm --filter pagepatch build
+```
+
+Start your app's dev server as usual, then point PagePatch at it from your project folder:
+
+```bash
+node /path/to/pagepatch/cli/dist/cli.js http://localhost:5173
+```
+
+PagePatch uses Claude Code if it's installed, then Codex (including the copy inside the ChatGPT desktop app). Switch any time under **Configure** in the panel, where you can also paste an API key instead.
+
+Open **http://localhost:4400**. Your site loads there with a **PagePatch** button in the corner.
+
+To run it as `pagepatch` from anywhere, link it once: `cd cli && npm link`.
+
+```
+pagepatch <dev-server-url> [options]
+
+  pagepatch http://localhost:5173
+  pagepatch 3000 --root ./web
+
+  --port <n>         Port for PagePatch (default 4400; the panel uses the next port)
+  --root <dir>       Project folder to edit (default: current folder)
+  --provider <name>  claude-code, codex, anthropic, or openai (default: Claude Code, then Codex)
+  --model <id>       Model for that provider (default: sonnet for Claude Code)
+```
 
 ## How it works
 
 ```
-extension (side panel + picker)  ──HTTPS──▶  PagePatch API (Render)  ──▶  OpenAI / Anthropic
-                                                    │
-                                                    ├──▶ GitHub (GitHub App, user token)
-                                                    └──▶ Postgres (short-lived patch proposals)
+page   ──▶ proxy  127.0.0.1:4400 ──▶ your dev server (pages, assets, hot reload)
+  │ postMessage
+panel  ──▶ panel  127.0.0.1:4401 ──▶ Claude Code / Codex (your login) or an API
+(iframe)                         └─▶ your project files (only after you approve a diff)
 ```
 
-1. Clicking the toolbar button grants access to the current tab only (`activeTab`) and opens the picker. Press <kbd>↑</kbd> to grow the selection to a parent section and <kbd>Esc</kbd> to cancel.
-2. The side panel sends a simplified copy of the selection (tags, classes, visible text, link paths) plus your message. The model replies with **preview operations**: set text, set styles, set attributes, insert, remove, or move.
-3. Both the API and the extension validate every operation independently. Operations can only target elements inside the selection, use an allowlist of HTML tags, attributes, and CSS properties, and never carry scripts, event handlers, `url()`, or `javascript:` links. Changes are built on a detached copy and only shown if every operation succeeds.
-4. The original element stays in the page (hidden) while a preview is shown, so React and other frameworks keep working. Undo, Reset, and navigation restore it. If the page replaces the element, PagePatch asks you to select it again.
-5. **Generate source patch** searches a bounded snapshot of the chosen branch (up to 3,000 eligible files, skipping build output) for the visible text and class names, sends at most 5 matching files to the model, and asks it for exact search-and-replace edits. Edits that don't match the file exactly once are rejected. If the match is ambiguous, you choose the file.
-6. **Create draft PR** rechecks your access and the base commit, then commits the reviewed diff to a new `pagepatch/…` branch and opens a draft PR. If the base branch moved, PagePatch regenerates the diff and asks you to review it again. It never writes to the base branch and never merges.
+1. `pagepatch` is a reverse proxy in front of your dev server. It passes through every request, including the hot-reload websocket, and adds one `<script>` tag to HTML pages: a small loader with no secrets.
+2. The loader shows a **PagePatch** button and, when you click it, docks the panel on the right. The panel is an iframe served from the next port, a different origin, so your page's own scripts can't read it, call its API, or click its buttons. The panel drives the picker in the page over `postMessage`, and both sides check each other's origin.
+3. Click a section. Press <kbd>↑</kbd> to grow the selection to a parent and <kbd>Esc</kbd> to cancel.
+4. Your message and a simplified copy of the selection (tags, classes, visible text, link paths) go to the model. It replies with **preview operations**: set text, set styles, set attributes, insert, remove, or move.
+5. The server and the page each validate every operation. Operations can only target elements inside the selection, use an allowlist of HTML tags, attributes, and CSS properties, and never carry scripts, event handlers, `url()`, or `javascript:` links. Changes are built on a detached copy and only shown if every operation succeeds. If the model's response breaks a rule, PagePatch sends it back with the reason so the model can correct it (up to 3 tries in all). Source edits that don't match the file get the same treatment.
+6. The original element stays in the page (hidden) while a preview is shown, so React and other frameworks keep working. Undo and Reset work on the selected section; Close and navigation restore everything. If the page replaces the element, PagePatch asks you to select it again.
+7. You can change several sections. Previews stay when you select another section, and clicking inside a section you already changed picks its conversation back up. A selection that would contain a changed section is refused.
+8. **Generate source patch** covers every changed section in one diff. It searches your project folder (skipping `node_modules`, build output, and dot folders) for each section's visible text and class names, sends the matching files (at most 5 per section) to the model in one request, and asks for exact search-and-replace edits. Edits that don't match the file exactly once are rejected. If a section's match is ambiguous, you choose its file.
+9. **Write to files** checks that each file hasn't changed since the diff was made, then writes it. If something changed, PagePatch regenerates the diff and asks you to review it again. Use git to review or revert.
 
-The diff is a proposed translation of the preview. PagePatch doesn't build or run your repository, so verify the PR locally.
+### Local safety
+
+- Both ports listen on 127.0.0.1 only and reject any other Host header, which blocks DNS rebinding.
+- The API only answers the panel's own origin, with a random token created on each run. The token lives only in the panel document; neither your page nor other sites can read it. The panel can only be framed by the proxy origin.
+- The proxy translates only its own Origin/Referer to the dev server's. Requests from other sites keep their Origin, so your dev server's own CSRF and websocket checks still work.
+- Known limit: a script in your page can't call the API or read the panel, but it could restyle or cover the panel's iframe. Only approve diffs you've read.
+- Writes only go to regular files inside `--root`. Symlinks and paths that leave the folder are refused.
+- Claude Code runs with all its tools turned off, in an empty temporary folder, so it can only answer. Codex runs in its read-only sandbox in an empty temporary folder and is told not to run commands.
+- An API key you paste under Configure stays in the `pagepatch` process's memory until it stops. It's never written to disk or sent back to the browser. `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` in your environment also work.
+
+See [docs/privacy.md](docs/privacy.md).
 
 ## Repository layout
 
 | Path | What |
 | --- | --- |
-| `extension/` | Manifest V3 extension: `background.ts` (toolbar), `content.ts` (picker + preview), `sidepanel.ts` (UI) |
-| `api/` | Hono API: provider proxy, GitHub search/diff/PR, Postgres proposals |
-| `shared/` | Preview operation allowlists, validators, and JSON schemas used by both sides |
+| `cli/src/cli.ts` | Command-line entry: arguments, provider key, startup |
+| `cli/src/server.ts` | Proxy (HTML injection, websocket passthrough) and panel server (`preview` / `propose` / `apply`) |
+| `cli/src/overlay.ts` | Loader injected into pages: launcher, panel iframe, `postMessage` bridge |
+| `cli/src/panel.ts` | Panel UI, running in the cross-origin iframe |
+| `cli/src/page.ts` | Picker, selection snapshot, and preview application |
+| `cli/src/llm.ts` | Model backends: Claude Code and Codex CLIs, Anthropic and OpenAI APIs |
+| `cli/src/search.ts`, `patch.ts` | File ranking, search/replace edits and diffs |
+| `shared/` | Preview operation allowlists, validators, and JSON schemas |
 | `fixtures/` | Demo pages: `static/` (HTML/CSS) and `react/` (React 18) |
-| `docs/` | Privacy policy and Chrome Web Store materials |
 
-## Local development
-
-Requirements: Node 22, pnpm 10, Docker (for Postgres).
-
-```bash
-pnpm install
-docker run -d --rm --name pagepatch-pg -e POSTGRES_PASSWORD=pp -e POSTGRES_DB=pagepatch -p 54329:5432 postgres:16-alpine
-```
-
-Run the API:
-
-```bash
-cd api
-DATABASE_URL=postgres://postgres:pp@localhost:54329/pagepatch \
-ALLOWED_EXTENSION_IDS=<your unpacked extension id> \
-GITHUB_CLIENT_ID=... GITHUB_CLIENT_SECRET=... \
-pnpm dev
-```
-
-Build and load the extension:
-
-```bash
-PAGEPATCH_API=http://localhost:8787 GH_CLIENT_ID=... GH_APP_SLUG=... pnpm --filter @pagepatch/extension build
-```
-
-Then open `chrome://extensions`, turn on Developer mode, choose **Load unpacked**, and select `extension/dist`. Copy the extension id into `ALLOWED_EXTENSION_IDS`.
-
-Try it on the fixtures:
-
-```bash
-pnpm --filter @pagepatch/fixture-react build
-npx serve fixtures/react/dist   # or fixtures/static
-```
-
-### Tests
+## Tests
 
 ```bash
 pnpm typecheck
-pnpm --filter @pagepatch/shared test        # validator: allowlists, unsafe output
-DATABASE_URL=postgres://postgres:pp@localhost:54329/pagepatch pnpm --filter @pagepatch/api test
-pnpm --filter @pagepatch/fixture-react build && pnpm --filter @pagepatch/extension test   # Chromium E2E
+pnpm --filter @pagepatch/shared test   # validator: allowlists, unsafe output
+pnpm --filter pagepatch test           # server + browser end-to-end
 ```
 
-The E2E suite loads the real extension in Chromium against both fixtures with a scripted API mock. It covers selecting a section, changing copy and layout, adding, removing, and reordering children, follow-ups, undo and reset, unsafe model output, snapshot privacy, navigation, stale selections after a React re-render, ambiguous file matches, an advanced base branch, and draft PR creation. The API suite runs against real Postgres with GitHub and both providers mocked. It covers structured output requests for each provider, malformed responses, denied access, proposal ownership, retries that reuse the branch, and log hygiene.
-
-## GitHub App setup
-
-Create the app at **GitHub → Settings → Developer settings → GitHub Apps → New GitHub App**:
-
-- **Callback URL**: `https://<extension-id>.chromiumapp.org/`
-- **Request user authorization (OAuth) during installation**: off (users sign in from the side panel)
-- **Webhook**: inactive
-- **Repository permissions**: Contents: *Read and write*, Pull requests: *Read and write*, Metadata: *Read-only*
-- **Where can this GitHub App be installed?**: Any account
-
-Use the app's **Client ID** and a generated **client secret** for `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` (API) and `GH_CLIENT_ID` (extension build), and the app's URL slug for `GH_APP_SLUG`. Users install the app on the repositories they choose; the user token PagePatch gets can only reach repositories where the app is installed **and** the user has access.
-
-## Deploying the API (Render)
-
-`render.yaml` defines a Node web service and a Postgres database. Create a Blueprint from this repo in Render, then set these secrets in the dashboard: `ALLOWED_EXTENSION_IDS` (the Web Store id, plus your unpacked id if you need it), `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`. Approximate cost: $7/month for the web service (Starter) plus $6/month for Postgres (Basic 256 MB).
-
-Logs record only route, method, status, timing, and an error category. Request bodies, headers, API keys, GitHub tokens, page content, and repository content are never logged. Patch proposals expire after 60 minutes and are deleted a day later.
-
-## Releasing
-
-1. Bump `version` in `extension/manifest.json`.
-2. Tag `v<version>` and push. CI runs the tests, builds the extension against the hosted API (repository variables `PAGEPATCH_API`, `GH_CLIENT_ID`, `GH_APP_SLUG`), and attaches `pagepatch-extension-v<version>.zip` to a GitHub release.
-3. Upload the same ZIP in the Chrome Web Store developer dashboard. See `docs/store-listing.md`.
-
-## V1 boundaries
-
-PagePatch focuses on visual and content edits to existing pages. Custom JavaScript behavior, cross-frame editing, automatic deployment, and merging are out of scope.
-
-## License
-
-MIT
+The server tests cover HTML injection and caching, redirects, Host/token/Origin checks, Origin passthrough for foreign sites, upstream aborts, websocket passthrough, writing a reviewed diff, refusing a stale one, and refusing paths outside the project. The end-to-end suite runs the real server in front of both fixtures (copied to a temp folder) with a scripted model and drives the overlay in headless Chrome. It covers selecting, follow-ups, undo and reset, unsafe model output, snapshot privacy, page scripts being unable to reach the panel or API, a React re-render replacing the selection, and writing the source change to disk. Locally it uses your installed Chrome with a fresh profile; CI uses Playwright's Chromium.

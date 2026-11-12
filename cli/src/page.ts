@@ -1,5 +1,4 @@
-// Injected into the active tab on toolbar click (activeTab + scripting).
-// Owns the picker, the selection snapshot, and preview application.
+// Page side of the overlay: the picker, the selection snapshot, and preview application.
 //
 // Preview model: the page's original element is never moved or mutated beyond
 // being hidden. Each applied change builds a new clone of the current state,
@@ -7,71 +6,49 @@
 // shows it right after the hidden original. Keeping the original in place
 // means frameworks like React can still update or replace it without
 // crashing; if they replace it, the preview is dropped and the user reselects.
+//
+// Several sections can carry previews at once. Picking a new section keeps the
+// others; selecting inside a changed section resumes it. Sections never nest:
+// a selection that would contain a changed section is refused.
 // ponytail: the extra sibling can shift :nth-child / sibling selectors while
 // previewing; acceptable for a preview, revisit if users hit it.
 
 import { ALLOWED_TAGS, validatePreview, type NewNode, type PreviewOp } from "@pagepatch/shared";
 
-declare global { interface Window { __pagepatch?: { pick(): void } } }
+export type PageEvent =
+  | { type: "picking" }
+  | { type: "selected"; id: number; label: string; count: number; tooLarge: boolean; resumed: boolean }
+  | { type: "pickCancelled"; reason?: string }
+  | { type: "stale"; id: number }
+  | { type: "navigated" };
 
-if (window.__pagepatch) {
-  window.__pagepatch.pick();
-} else {
-  main();
-}
-
-function main() {
-  const ID = "data-pp-id";
-  let port: chrome.runtime.Port | null = null;
-  let orig: Element | null = null;        // the page's real element
-  let pristine: Element | null = null;    // detached clone with ids, never mutated
-  let live: Element | null = null;        // preview clone shown after the hidden original (null = no preview)
-  let stack: (Element | null)[] = [];     // previous `live` values for undo
-  let origDisplay: [string, string] | null = null; // orig's inline display value/priority before hiding
-  let nextId = 0;
-  // Bumped on every selection/preview state change; a proposal only applies to the state it was made for.
-  let version = 0;
+interface Section {
+  id: number;
+  orig: Element;                     // the page's real element
+  pristine: Element;                 // detached clone with ids, never mutated
+  live: Element | null;              // preview clone shown after the hidden original (null = no preview)
+  stack: (Element | null)[];         // previous `live` values for undo
+  origDisplay: [string, string] | null; // orig's inline display value/priority before hiding
+  nextId: number;
   // Image sources already in the selection. Model-set src must be one of these or a same-origin path,
   // so applying a preview can't make the browser request an attacker-chosen URL.
-  let allowedSrc = new Set<string>();
+  allowedSrc: Set<string>;
+}
 
-  // ---- messaging ----
+/**
+ * `host` is the overlay's own element: events that land on it (the panel) are
+ * never treated as page clicks while picking.
+ */
+export function createPage(host: HTMLElement, shadow: ShadowRoot, send: (e: PageEvent) => void) {
+  const ID = "data-pp-id";
+  const sections = new Map<number, Section>();
+  let cur: Section | null = null;   // the section the panel is editing
+  let seq = 0;
+  // Bumped on every selection/preview state change; a proposal only applies to the state it was made for.
+  let version = 0;
 
-  function connect() {
-    if (port) return;
-    try {
-      port = chrome.runtime.connect({ name: "pagepatch-content" });
-      port.onDisconnect.addListener(() => { port = null; });
-    } catch { port = null; }
-  }
-  const send = (msg: object) => { connect(); try { port?.postMessage(msg); } catch { /* panel closed */ } };
+  // ---- picker (lives in the overlay's closed shadow root so page CSS can't touch it) ----
 
-  chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
-    try {
-      reply(handle(msg));
-    } catch (e) {
-      reply({ ok: false, error: e instanceof Error ? e.message : String(e) });
-    }
-  });
-
-  function handle(msg: any): object {
-    switch (msg?.type) {
-      case "hello": connect(); return { ok: true, selected: !!orig, label: orig ? label(orig) : null };
-      case "pick": pick(); return { ok: true };
-      case "parent": return selectParent();
-      case "snapshot": return snapshot(msg.which === "pristine");
-      case "apply": return apply(msg.ops, msg.version);
-      case "undo": return undo();
-      case "reset": reset(); version++; return { ok: true };
-      case "clear": reset(); clearSelection(); stopPicking(); return { ok: true };
-      default: return { ok: false, error: "unknown message" };
-    }
-  }
-
-  // ---- picker (overlay lives in a closed shadow root so page CSS can't touch it) ----
-
-  const host = document.createElement("pagepatch-overlay");
-  const shadow = host.attachShadow({ mode: "closed" });
   const box = document.createElement("div");
   const tag = document.createElement("div");
   shadow.append(box, tag);
@@ -93,23 +70,32 @@ function main() {
     const el = document.elementFromPoint(e.clientX, e.clientY);
     if (el && el !== host && el !== document.documentElement && el !== document.body) { hovered = el; place(el); }
   };
-  const swallow = (e: Event) => { e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation(); };
+  // Events on the panel itself (retargeted to `host` by the shadow root) pass through.
+  const swallow = (e: Event) => { if (e.target === host) return; e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation(); };
   const onClick = (e: MouseEvent) => {
+    if (e.target === host) return;
     swallow(e);
-    if (hovered) select(hovered);
+    const el = hovered;
     stopPicking();
+    if (el) select(el); else send({ type: "pickCancelled" });
   };
-  const onKey = (e: KeyboardEvent) => {
-    if (e.key === "Escape") { swallow(e); stopPicking(); send({ type: "pickCancelled" }); }
-    if (e.key === "ArrowUp" && hovered?.parentElement && hovered.parentElement !== document.body) {
-      swallow(e); hovered = hovered.parentElement; place(hovered);
+  /** Esc cancels, ↑ grows to the parent. Returns true if the key was used. Also called for keys pressed in the panel. */
+  function pickKey(key: string) {
+    if (!picking) return false;
+    if (key === "Escape") { stopPicking(); send({ type: "pickCancelled" }); return true; }
+    if (key === "ArrowUp" && hovered?.parentElement && hovered.parentElement !== document.body) {
+      hovered = hovered.parentElement; place(hovered); return true;
     }
+    return false;
+  }
+  // Keys typed in the panel never reach this window (it's a separate iframe), so no host check here.
+  const onKey = (e: KeyboardEvent) => {
+    if (pickKey(e.key)) { e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation(); }
   };
 
   function pick() {
-    reset();
-    clearSelection();
-    if (!host.isConnected) document.documentElement.append(host);
+    leaveCurrent();
+    hovered = null;
     picking = true;
     addEventListener("mousemove", onMove, true);
     addEventListener("click", onClick, true);
@@ -142,83 +128,109 @@ function main() {
   // Emitted as leaves in snapshots; their descendants get no ids and can't be targeted.
   const LEAF = new Set(["svg", "math", "canvas", "select", "textarea", "video", "audio", "picture"]);
 
-  function assignIds(root: Element) {
+  function assignIds(sec: Section, root: Element) {
     const walk = (el: Element) => {
       if (el instanceof HTMLInputElement && el.type === "hidden") return;
-      el.setAttribute(ID, `pp${nextId++}`);
+      el.setAttribute(ID, `pp${sec.nextId++}`);
       if (!LEAF.has(el.localName)) for (const c of el.children) walk(c);
     };
     walk(root);
   }
 
+  /** Stop editing the current section. It stays on the page only if it has a preview. */
+  function leaveCurrent() {
+    if (cur && !cur.live) sections.delete(cur.id);
+    cur = null;
+    version++;
+  }
+
   function select(el: Element) {
     if (el.matches(DANGEROUS)) return;
-    orig = el;
-    nextId = 0;
-    version++;
-    pristine = el.cloneNode(true) as Element;
+    // Inside a changed section: pick up where it left off.
+    for (const sec of sections.values()) {
+      if (sec.live?.contains(el)) {
+        cur = sec;
+        version++;
+        send({ type: "selected", id: sec.id, label: label(sec.orig), count: sec.pristine.querySelectorAll("*").length + 1, tooLarge: false, resumed: true });
+        return;
+      }
+    }
+    for (const sec of sections.values()) {
+      if (sec.live && (el.contains(sec.orig) || el.contains(sec.live))) {
+        send({ type: "pickCancelled", reason: `That area contains ${label(sec.orig)}, which you already changed. Click inside it to keep editing it, or pick a smaller section.` });
+        return;
+      }
+    }
+    const pristine = el.cloneNode(true) as Element;
     pristine.querySelectorAll(DANGEROUS).forEach((d) => d.remove());
-    assignIds(pristine);
-    allowedSrc = new Set([...pristine.querySelectorAll("[src]")].map((e) => e.getAttribute("src")!));
-    live = null;
-    stack = [];
+    const sec: Section = { id: ++seq, orig: el, pristine, live: null, stack: [], origDisplay: null, nextId: 0, allowedSrc: new Set() };
+    assignIds(sec, pristine);
+    sec.allowedSrc = new Set([...pristine.querySelectorAll("[src]")].map((e) => e.getAttribute("src")!));
+    sections.set(sec.id, sec);
+    cur = sec;
+    version++;
     const count = pristine.querySelectorAll("*").length + 1;
-    send({ type: "selected", label: label(el), count, tooLarge: count > 1500 });
+    send({ type: "selected", id: sec.id, label: label(el), count, tooLarge: count > 1500, resumed: false });
   }
 
   function selectParent() {
-    const p = orig?.parentElement;
-    if (!orig || !p || p === document.body || p === document.documentElement) return { ok: false, error: "No parent section to select." };
-    // Parent selection resets any preview so the parent's clone reflects the real page.
-    reset();
+    if (!cur) return { ok: false, error: "Select a section first." };
+    if (cur.live) return { ok: false, error: "This section has changes. Reset them first, or pick a different section." };
+    const p = cur.orig.parentElement;
+    if (!p || p === document.body || p === document.documentElement) return { ok: false, error: "No parent section to select." };
+    leaveCurrent();
     select(p);
     return { ok: true };
   }
 
-  function clearSelection() { orig = pristine = live = null; stack = []; }
-
-  /** The visible node for this selection. */
-  const current = () => live ?? orig;
-
-  function hideOrig() {
-    if (!orig || origDisplay) return;
-    const s = (orig as HTMLElement).style;
-    origDisplay = [s.getPropertyValue("display"), s.getPropertyPriority("display")];
+  function hideOrig(sec: Section) {
+    if (sec.origDisplay) return;
+    const s = (sec.orig as HTMLElement).style;
+    sec.origDisplay = [s.getPropertyValue("display"), s.getPropertyPriority("display")];
     s.setProperty("display", "none", "important");
   }
 
-  function showOrig() {
-    if (!orig || !origDisplay) return;
-    const s = (orig as HTMLElement).style;
-    if (origDisplay[0]) s.setProperty("display", origDisplay[0], origDisplay[1]);
+  function showOrig(sec: Section) {
+    if (!sec.origDisplay) return;
+    const s = (sec.orig as HTMLElement).style;
+    if (sec.origDisplay[0]) s.setProperty("display", sec.origDisplay[0], sec.origDisplay[1]);
     else s.removeProperty("display");
-    if (!s.length) orig.removeAttribute("style");
-    origDisplay = null;
+    if (!s.length) sec.orig.removeAttribute("style");
+    sec.origDisplay = null;
   }
 
-  // Navigation clears the session. A full navigation unloads this script (the
-  // panel sees the port disconnect); SPA route changes are caught by polling.
-  // ponytail: 500ms poll; isolated worlds can't hook the page's history.pushState.
+  /** Remove every preview and forget every section. */
+  function clearAll() {
+    for (const sec of sections.values()) resetSection(sec);
+    sections.clear();
+    cur = null;
+    version++;
+  }
+
+  // Navigation clears the session. A full navigation reloads the overlay;
+  // SPA route changes are caught by polling.
+  // ponytail: 500ms poll instead of patching the app's history.pushState.
   // Back/forward cache restores the page as-is; never leave a preview behind with no panel to undo it.
-  addEventListener("pagehide", () => { reset(); clearSelection(); stopPicking(); });
+  addEventListener("pagehide", () => { clearAll(); stopPicking(); });
 
   let href = location.href;
   setInterval(() => {
     if (location.href !== href) {
       href = location.href;
-      reset(); clearSelection(); stopPicking();
+      clearAll(); stopPicking();
       send({ type: "navigated" });
     }
   }, 500);
 
-  // A framework re-render can replace the selected node (or the page can remove our preview).
+  // A framework re-render can replace a section's node (or the page can remove our preview).
   new MutationObserver(() => {
-    if (!orig) return;
-    if (!orig.isConnected || (live && !live.isConnected)) {
-      live?.remove();
-      origDisplay = null;   // orig is gone or we no longer control it
-      clearSelection();
-      send({ type: "stale" });
+    for (const sec of [...sections.values()]) {
+      if (sec.orig.isConnected && (!sec.live || sec.live.isConnected)) continue;
+      sec.live?.remove();
+      sections.delete(sec.id);   // orig is gone or we no longer control it
+      if (cur === sec) cur = null;
+      version++;
+      send({ type: "stale", id: sec.id });
     }
   }).observe(document.documentElement, { childList: true, subtree: true });
 
@@ -297,9 +309,12 @@ function main() {
     return { texts: [...texts].slice(0, 30), classes: [...classes].slice(0, 30), ids: [...ids].slice(0, 10) };
   }
 
-  function snapshot(usePristine: boolean) {
-    if (!orig || !pristine) return { ok: false, error: "Select a section first." };
-    if (!orig.isConnected) { clearSelection(); return { ok: false, error: "stale" }; }
+  /** Simplified HTML of a section (the current one unless `id` is given), before or after its preview. */
+  function snapshot(usePristine: boolean, id?: number) {
+    const sec = id === undefined ? cur : sections.get(id);
+    if (!sec) return { ok: false, error: id === undefined ? "Select a section first." : "stale" };
+    if (!sec.orig.isConnected) return { ok: false, error: "stale" };
+    const { orig, pristine, live } = sec;
     const root = usePristine || !live ? pristine : live;
     const styleSrc = usePristine || !live ? orig : live;
     const out: string[] = [];
@@ -313,7 +328,7 @@ function main() {
     serialize(root, styleSrc, 0, out, budget);
     if (budget.n <= 0) return { ok: false, error: "This section is too large. Select a smaller section." };
     const ids = [root, ...root.querySelectorAll(`[${ID}]`)].map((e) => e.getAttribute(ID)!);
-    return { ok: true, snapshot: out.join("\n"), ids, signals: signals(pristine), label: label(orig), version };
+    return { ok: true, snapshot: out.join("\n"), ids, signals: signals(pristine), label: label(orig), version, id: sec.id };
   }
 
   // ---- apply ----
@@ -322,7 +337,7 @@ function main() {
   const EDITABLE_TAGS = new Set<string>([...ALLOWED_TAGS, "label", "td", "th", "caption", "dt", "dd", "summary", "legend", "mark", "abbr", "cite", "q", "time", "u", "s", "del", "ins"]);
 
   /** Attribute rules that depend on the element: href only on links, src only on images (see allowedSrc). */
-  function attrError(tagName: string, name: string, value: string): string | null {
+  function attrError(allowedSrc: Set<string>, tagName: string, name: string, value: string): string | null {
     if (name === "href" && tagName !== "a") return "href is only allowed on links";
     if (name === "src") {
       if (tagName !== "img") return "src is only allowed on images";
@@ -332,25 +347,26 @@ function main() {
     return null;
   }
 
-  function build(n: NewNode): Element {
+  function build(sec: Section, n: NewNode): Element {
     const el = document.createElement(n.tag);
-    el.setAttribute(ID, `pp${nextId++}`);
+    el.setAttribute(ID, `pp${sec.nextId++}`);
     if (n.text) el.textContent = n.text;
     for (const [k, v] of Object.entries(n.attrs ?? {})) {
-      const err = attrError(n.tag, k, v);
+      const err = attrError(sec.allowedSrc, n.tag, k, v);
       if (err) throw new Error(err);
       el.setAttribute(k, v);
     }
     for (const [k, v] of Object.entries(n.styles ?? {})) el.style.setProperty(k, v);
-    for (const c of n.children ?? []) el.append(build(c));
+    for (const c of n.children ?? []) el.append(build(sec, c));
     return el;
   }
 
   function apply(rawOps: unknown, forVersion: unknown) {
-    if (!orig || !pristine) return { ok: false, error: "Select a section first." };
+    const sec = cur;
+    if (!sec) return { ok: false, error: "Select a section first." };
     if (forVersion !== version) return { ok: false, error: "This proposal was made for an earlier state of the section. Send your message again." };
-    const base = live ?? pristine;
-    if (!orig.isConnected) { clearSelection(); return { ok: false, error: "stale" }; }
+    const base = sec.live ?? sec.pristine;
+    if (!sec.orig.isConnected) return { ok: false, error: "stale" };
     const next = base.cloneNode(true) as Element;
     const byId = new Map<string, Element>();
     for (const el of [next, ...next.querySelectorAll(`[${ID}]`)]) byId.set(el.getAttribute(ID)!, el);
@@ -361,23 +377,23 @@ function main() {
 
     for (const op of v.value.ops as PreviewOp[]) {
       let err: string | null;
-      try { err = applyOp(next, byId, op); } catch (e) { err = e instanceof Error ? e.message : String(e); }
+      try { err = applyOp(sec, next, byId, op); } catch (e) { err = e instanceof Error ? e.message : String(e); }
       if (err) return { ok: false, error: `Rejected unsafe change: ${err}` };  // `next` is discarded; page untouched
     }
-    if (live) live.replaceWith(next);
-    else { hideOrig(); orig.after(next); }
-    stack.push(live);
-    live = next;
+    if (sec.live) sec.live.replaceWith(next);
+    else { hideOrig(sec); sec.orig.after(next); }
+    sec.stack.push(sec.live);
+    sec.live = next;
     version++;
     return { ok: true, canUndo: true };
   }
 
-  function applyOp(root: Element, byId: Map<string, Element>, op: PreviewOp): string | null {
+  function applyOp(sec: Section, root: Element, byId: Map<string, Element>, op: PreviewOp): string | null {
     if (op.op === "insert") {
       const parent = byId.get(op.parent)!;
       if (!(ALLOWED_TAGS as readonly string[]).includes(op.node.tag)) return "tag not allowed";
       if (parent.matches(DANGEROUS) || LEAF.has(parent.localName)) return `can't insert into <${parent.localName}>`;
-      const node = build(op.node);
+      const node = build(sec, op.node);
       parent.insertBefore(node, parent.children[op.index] ?? null);
       for (const el of [node, ...node.querySelectorAll(`[${ID}]`)]) byId.set(el.getAttribute(ID)!, el);
       return null;
@@ -397,7 +413,7 @@ function main() {
         return null;
       case "setAttr": {
         if (!EDITABLE_TAGS.has(el.localName)) return `attributes of <${el.localName}> can't be edited`;
-        const err = attrError(el.localName, op.name, op.value);
+        const err = attrError(sec.allowedSrc, el.localName, op.name, op.value);
         if (err) return err;
         el.setAttribute(op.name, op.value);
         return null;
@@ -417,23 +433,25 @@ function main() {
   }
 
   function undo() {
-    if (!live || !orig) return { ok: false, error: "Nothing to undo." };
-    const prev = stack.pop() ?? null;
-    if (prev) live.replaceWith(prev);
-    else { live.remove(); showOrig(); }
-    live = prev;
+    const sec = cur;
+    if (!sec?.live) return { ok: false, error: "Nothing to undo." };
+    const prev = sec.stack.pop() ?? null;
+    if (prev) sec.live.replaceWith(prev);
+    else { sec.live.remove(); showOrig(sec); }
+    sec.live = prev;
     version++;
-    return { ok: true, canUndo: live !== null };
+    return { ok: true, canUndo: sec.live !== null };
   }
 
-  function reset() {
-    live?.remove();
-    showOrig();
-    live = null;
-    stack = [];
+  function resetSection(sec: Section) {
+    sec.live?.remove();
+    showOrig(sec);
+    sec.live = null;
+    sec.stack = [];
   }
 
-  window.__pagepatch = { pick };
-  connect();
-  pick();
+  return { pick, pickKey, stopPicking, selectParent, snapshot, apply, undo,
+    /** Reset the current section's preview; other sections keep theirs. */
+    reset() { if (cur) resetSection(cur); version++; },
+    clear() { clearAll(); stopPicking(); } };
 }

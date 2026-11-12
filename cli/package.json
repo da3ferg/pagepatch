@@ -1,0 +1,26 @@
+{
+  "name": "pagepatch",
+  "version": "0.2.0",
+  "description": "Select a section of your local dev site, describe a change, preview it, and write it to your source files.",
+  "license": "MIT",
+  "type": "module",
+  "bin": { "pagepatch": "dist/cli.js" },
+  "files": ["dist"],
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "node scripts/build.mjs && node --test --test-concurrency=1 --experimental-strip-types src/*.test.ts scripts/*.test.mjs",
+    "typecheck": "tsc --noEmit -p ."
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.70.0",
+    "diff": "^8.0.2",
+    "openai": "^6.9.0"
+  },
+  "devDependencies": {
+    "@pagepatch/shared": "workspace:*",
+    "@types/node": "^22.10.0",
+    "esbuild": "^0.25.0",
+    "playwright": "^1.49.0"
+  }
+}
