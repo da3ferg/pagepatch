@@ -145,7 +145,7 @@ export function createPage(host: HTMLElement, shadow: ShadowRoot, send: (e: Page
   }
 
   function select(el: Element) {
-    if (el.matches(DANGEROUS)) return;
+    if (el.matches(DANGEROUS)) { send({ type: "pickCancelled", reason: `<${el.localName}> can't be edited. Pick the section around it.` }); return; }
     // Inside a changed section: pick up where it left off.
     for (const sec of sections.values()) {
       if (sec.live?.contains(el)) {
@@ -227,9 +227,9 @@ export function createPage(host: HTMLElement, shadow: ShadowRoot, send: (e: Page
     for (const sec of [...sections.values()]) {
       if (sec.orig.isConnected && (!sec.live || sec.live.isConnected)) continue;
       sec.live?.remove();
+      if (sec.orig.isConnected) showOrig(sec);   // only the preview was removed: give the page its element back
       sections.delete(sec.id);   // orig is gone or we no longer control it
-      if (cur === sec) cur = null;
-      version++;
+      if (cur === sec) { cur = null; version++; }
       send({ type: "stale", id: sec.id });
     }
   }).observe(document.documentElement, { childList: true, subtree: true });
@@ -341,7 +341,8 @@ export function createPage(host: HTMLElement, shadow: ShadowRoot, send: (e: Page
     if (name === "href" && tagName !== "a") return "href is only allowed on links";
     if (name === "src") {
       if (tagName !== "img") return "src is only allowed on images";
-      const samePath = value.startsWith("/") && !value.startsWith("//") && !/[?#]/.test(value);
+      // Browsers read "/\host" as "//host", so backslashes are refused along with "//".
+      const samePath = value.startsWith("/") && !value.startsWith("//") && !/[?#\\]/.test(value);
       if (!samePath && !allowedSrc.has(value)) return "new image sources must be a same-site path or an image already in the section";
     }
     return null;

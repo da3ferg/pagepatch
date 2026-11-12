@@ -81,6 +81,8 @@ function run(bin: string, args: string[], input: string, cwd: string): Promise<{
     child.stderr.on("data", (d) => (err += d));
     child.on("error", (e) => { clearTimeout(timer); reject(e); });
     child.on("close", (code) => { clearTimeout(timer); resolve({ code, out, err }); });
+    // The CLI can exit before reading the whole prompt; that EPIPE would otherwise crash PagePatch.
+    child.stdin.on("error", () => {});
     child.stdin.end(input);
   });
 }
@@ -117,11 +119,16 @@ async function claudeCode(model: string, c: Call): Promise<unknown> {
   return res.structured_output;
 }
 
+const CODEX_TOOLS = ["shell_tool", "unified_exec", "apps", "browser_use", "browser_use_external", "in_app_browser", "computer_use"];
+
 async function codex(model: string, c: Call): Promise<unknown> {
   return inTempDir(async (dir) => {
     await writeFile(join(dir, "schema.json"), JSON.stringify(c.schema));
     const args = [
       "exec", "--skip-git-repo-check", "--ephemeral", "--sandbox", "read-only", "--color", "never",
+      // No shell, browser, apps, or your own MCP servers: page and source text in the prompt is untrusted.
+      "--ignore-user-config",
+      ...CODEX_TOOLS.flatMap((f) => ["--disable", f]),
       "--output-schema", join(dir, "schema.json"), "-o", join(dir, "out.json"), "-C", dir,
       ...(model ? ["-m", model] : []), "-",
     ];

