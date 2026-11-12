@@ -1,5 +1,4 @@
 packages:
-  - extension
-  - api
+  - cli
   - shared
   - fixtures/react

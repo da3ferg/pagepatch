@@ -3,3 +3,6 @@ dist/
 release/
 .env
 test-results/
+.env.local
+*.pem
+.DS_Store
